@@ -16,30 +16,29 @@
  *
  * Both machines have 4 workers each, summing a total of 8 workers
  *
- * machine1$: java -jar test.jar 1
- *
- * machine0$: java -jar test.jar 0
- *
  */
 package akka_microbench.remote
 
 import akka.actor.Actor
 import Actor._
 import akka.actor.ActorRef
-import akka.actor.PoisonPill
-import akka.actor.ReceiveTimeout
 import akka.dispatch._
-import akka.dispatch.MailboxType
 import java.util.Date
-import java.net.InetAddress
-import java.util.concurrent.ConcurrentLinkedQueue
-import scala.util.Random
-import scala.concurrent.forkjoin.LinkedTransferQueue
+import akka.serialization.RemoteActorSerialization
 
 sealed trait PingMessage
+
 case object Start extends PingMessage
+
 case class PingMsg(hops: Int) extends PingMessage
+
+case class Workers(actorRefs: Array[Array[Byte]]) extends PingMessage
+
 case object End extends PingMessage
+
+case class MessageCount(count: Long) extends PingMessage
+
+case class MailboxSizes(workerId: String, sizes: List[Long]) extends PingMessage
 
 /*trait Unbound extends MessageQueue { self: LinkedTransferQueue[MessageInvocation] =>
   @inline
@@ -50,9 +49,9 @@ case object End extends PingMessage
 
 trait IpDefinition {
 
-  def machine0 = "130.60.157.52"
+  def machine0 = "127.0.0.1"
 
-  def machine1 = "130.60.157.139"
+  def machine1 = "127.0.0.1"
 }
 
 /**
@@ -65,16 +64,20 @@ class Worker(id: Int, coordRef: ActorRef, numWorkers: Int, numMessages: Int, num
   var workers: Array[ActorRef] = new Array[ActorRef](numWorkers)
 
   var lastTime = 0l
-
-  override def preStart {
-
-    for (i <- 0 until 4)
-      workers(i) = remote.actorFor("worker-service" + i, machine0, 2552)
-
-    for (i <- 4 until 8)
-      workers(i) = remote.actorFor("worker-service" + i, machine1, 2552)
-
-  }
+  var messages = 0L
+  //
+  //  override def preStart {
+  //
+  //    for (i <- 0 until numWorkers) {
+  //      if (i % 2 == 0) {
+  //        workers(i) = remote.actorFor("worker-service" + i, machine0, 2552)
+  //      } else {
+  //        workers(i) = remote.actorFor("worker-service" + i, machine1, 2553)
+  //      }
+  //    }
+  //
+  //
+  //  }
 
   def receive = {
 
@@ -83,6 +86,8 @@ class Worker(id: Int, coordRef: ActorRef, numWorkers: Int, numMessages: Int, num
         self ! PingMsg(numHops)
 
     case PingMsg(hops) =>
+      messages += 1
+
       if (hops == 0)
         coordRef ! End
       else {
@@ -90,7 +95,7 @@ class Worker(id: Int, coordRef: ActorRef, numWorkers: Int, numMessages: Int, num
         var now = System.nanoTime
 
         if (now - lastTime > 1000000000) {
-          println(self.mailboxSize)
+          println(dispatcher.mailboxSize(self))
           lastTime = System.nanoTime
           println("h:" + hops)
         }
@@ -100,25 +105,16 @@ class Worker(id: Int, coordRef: ActorRef, numWorkers: Int, numMessages: Int, num
         else
           workers(Random.nextInt(3)) ! PingMsg(hops - 1)*/
 
-        if (id == 0)
-          workers(7) ! PingMsg(hops - 1)
-        else if (id == 1)
-          workers(6) ! PingMsg(hops - 1)
-        else if (id == 2)
-          workers(5) ! PingMsg(hops - 1)
-        else if (id == 3)
-          workers(4) ! PingMsg(hops - 1)
-        else if (id == 4)
-          workers(3) ! PingMsg(hops - 1)
-        else if (id == 5)
-          workers(2) ! PingMsg(hops - 1)
-        else if (id == 6)
-          workers(1) ! PingMsg(hops - 1)
-        else if (id == 7)
-          workers(0) ! PingMsg(hops - 1)
+        val nextWorker = numWorkers - id - 1
+        workers(nextWorker) ! PingMsg(hops - 1)
       }
 
+    case Workers(x) =>
+      workers = x.map(bytes => RemoteActorSerialization.fromBinaryToRemoteActorRef(bytes))
+
     case End =>
+      println("worker " + id + " handled " + messages + " messages")
+      coordRef ! MessageCount(messages)
       self.stop()
   }
 
@@ -141,6 +137,8 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
   var runs: List[Long] = List()
   var workers: Array[ActorRef] = new Array[ActorRef](numWorkers)
 
+  var totalMessages = 0L
+
   def receive = {
 
     /*case ReceiveTimeout =>
@@ -151,29 +149,37 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
       receivedEnds = 0
 
       // create the workers
-      for (i <- 0 until 4)
-        workers(i) = remote.actorFor("worker-service" + i, machine0, 2552)
+      for (i <- 0 until numWorkers) {
+        if (i % 2 == 0) {
+          workers(i) = remote.actorFor("worker-service" + i, machine0, 2552)
+        } else {
+          workers(i) = remote.actorFor("worker-service" + i, machine1, 2553)
+        }
+      }
 
-      for (i <- 4 until 8)
-        workers(i) = remote.actorFor("worker-service" + i, machine1, 2552)
 
       println("Master start run #" + reps)
 
+      // let each worker know about all the other workers.
+      for (i <- 0 until numWorkers)
+        workers(i) ! Workers(workers.map(w => RemoteActorSerialization.toRemoteActorRefProtocol(w).toByteArray))
+
       start = System.nanoTime
 
-      val workersPar = workers.par
+      //      val workersPar = workers.par
 
-      workersPar foreach { x =>
+      //      workersPar foreach {
+      //        x =>
+      //
+      //        //for (i <- 0 until numMessages)
+      //          x ! Start
+      //
+      //      }
 
-        //for (i <- 0 until numMessages)
-        x ! Start
-
-      }
-
-    // send to all of the workers 'numMessages' messages
-    /*for (i <- 0 until numWorkers)
+      // send to all of the workers 'numMessages' messages
+      for (i <- 0 until numWorkers)
         for (j <- 0 until numMessages)
-          workers(i) ! PingMsg(numHops)*/
+          workers(i) ! PingMsg(numHops)
 
     case End =>
       receivedEnds += 1
@@ -191,10 +197,19 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
           self ! Start
         } else {
           println("Repetitions reached. Broadcasting shutdown...")
-          workers.foreach { x => x ! PoisonPill }
+          workers.foreach {
+            x => x ! End
+          }
+          // this would work too... but we have some logic in End we want to preserve.
+          //          workers.foreach { x => x ! PoisonPill }
           self.stop()
         }
       }
+
+    case MessageCount(count) =>
+      totalMessages += count
+      println("total messages: " + totalMessages)
+
 
   }
 
@@ -210,6 +225,28 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
   }
 
 }
+
+/**
+ * Creates workers for one machine
+ */
+object RemoteRandomPingWorkerManager extends IpDefinition {
+
+  def start(coord: ActorRef, port: Int = 2552, numWorkers: Int = 4, host: String = "localhost"): Seq[ActorRef] = {
+
+    // start up our remote actor service.
+    remote.start("localhost", port)
+
+    // this returns a list of (numWorkers) actors
+    (1 to numWorkers).map {
+      i =>
+        val newWorker = actorOf(new WorkerProtoBuf(coord))
+        remote.register("worker-" + host + "-" + port + "-" + i, newWorker)
+        newWorker
+    }
+  }
+}
+
+
 /**
  * Start this using arguments 1 first in one machine
  * Then, start this using arguments 0 in another machine
@@ -227,7 +264,11 @@ object RemoteRandomPingMachine extends IpDefinition {
 
     val numWorkersTotal = 8
 
-    remote.start(InetAddress.getLocalHost.getHostAddress, 2552)
+    if (args(0).equals("0")) {
+      remote.start("localhost", 2552)
+    } else {
+      remote.start("localhost", 2553)
+    }
 
     val coord = remote.actorFor("coord-service", machine0, 2552)
 
@@ -272,70 +313,70 @@ object RemoteRandomPingMachine extends IpDefinition {
       println("Queue01 = withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
 
     } else if (args(1) equals "02") {
 
       println("Queue02 = withNewThreadPoolWithLinkedBlockingQueueWithCapacity(8)")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithLinkedBlockingQueueWithCapacity(8)
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithLinkedBlockingQueueWithCapacity(8)
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
 
     } else if (args(1) equals "03") {
 
       println("Queue03 = withNewThreadPoolWithLinkedBlockingQueueWithCapacity(128)")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithLinkedBlockingQueueWithCapacity(100)
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithLinkedBlockingQueueWithCapacity(100)
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
 
     } else if (args(1) equals "04") {
 
       println("Queue04 = withNewThreadPoolWithSynchronousQueueWithFairness(true)")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithSynchronousQueueWithFairness(true)
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithSynchronousQueueWithFairness(true)
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
 
     } else if (args(1) equals "05") {
 
       println("Queue05 = withNewThreadPoolWithSynchronousQueueWithFairness(false)")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithSynchronousQueueWithFairness(false)
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithSynchronousQueueWithFairness(false)
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
 
     } else if (args(1) equals "06") {
 
       println("Queue06 = withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(8, false)")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(8, false)
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(8, false)
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
 
     } else if (args(1) equals "07") {
 
       println("Queue07 = withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(8, true)")
 
       sharedDispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("shared executor dispatcher", throughput, UnboundedMailbox())
-        .withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(8, true)
-        .setCorePoolSize(poolSize)
-        .setMaxPoolSize(maxPoolSize)
-        .build
+              .withNewThreadPoolWithArrayBlockingQueueWithCapacityAndFairness(8, true)
+              .setCorePoolSize(poolSize)
+              .setMaxPoolSize(maxPoolSize)
+              .build
     }
 
     /*var sharedDispatcher: MessageDispatcher = null
@@ -355,15 +396,16 @@ object RemoteRandomPingMachine extends IpDefinition {
     val workers = 8
     val messages = 10000
     val hops = 100
-    val repetitions = 5
+    val repetitions = 3
 
-    /** MACHINE 0 */
+    /**MACHINE 0 */
     if (args(0) equals "0") {
 
-      remote.register("worker-service0", actorOf(new Worker(0, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
-      remote.register("worker-service1", actorOf(new Worker(1, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
-      remote.register("worker-service2", actorOf(new Worker(2, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
-      remote.register("worker-service3", actorOf(new Worker(3, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
+      for (i <- 0 until workers) {
+        if (i % 2 == 0) {
+          remote.register("worker-service" + i, actorOf(new Worker(i, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
+        }
+      }
 
       println("Workers: " + workers)
       println("Messages: " + messages)
@@ -378,14 +420,13 @@ object RemoteRandomPingMachine extends IpDefinition {
 
     } else {
 
-      /** MACHINE 1 */
+      /**MACHINE 1 */
 
-      remote.register("worker-service4", actorOf(new Worker(4, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
-      remote.register("worker-service5", actorOf(new Worker(5, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
-      remote.register("worker-service6", actorOf(new Worker(6, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
-      remote.register("worker-service7", actorOf(new Worker(7, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
+      for (i <- 0 until workers) {
+        if (i % 2 == 1) {
+          remote.register("worker-service" + i, actorOf(new Worker(i, coord, numWorkersTotal, messages, hops, sharedDispatcher)))
+        }
+      }
     }
-
   }
-
 }

@@ -14,20 +14,24 @@ package akka_microbench.local
 import akka.actor.Actor
 import akka.actor.Actor._
 import akka.actor.ActorRef
-import akka.actor.PoisonPill
 import akka.dispatch._
 
 import scala.util.Random
 
 import java.util.Date
 
-import akka.actor.ReceiveTimeout
 
 sealed trait PingMessage
+
 case class Start extends PingMessage
+
 case class Workers(actorRefs: Vector[ActorRef]) extends PingMessage
+
 case class Ping(hops: Int) extends PingMessage
+
 case class End extends PingMessage
+
+case class MessageCount(messages: Long) extends PingMessage
 
 /**
  * Receives ping messages and sends out another ping, decreasing the hop counter at receive.
@@ -38,18 +42,23 @@ class Worker(coordRef: ActorRef, numWorkers: Int) extends Actor {
 
   var workers: scala.collection.immutable.Vector[ActorRef] = _
 
+  var messages = 0L
+
   def receive = {
 
     case Workers(x) =>
       workers = x
 
     case Ping(hops) =>
+      messages += 1
       if (hops == 0)
         coordRef ! End
       else
         workers(Random.nextInt(numWorkers)) ! Ping(hops - 1)
 
     case End =>
+      println("I handled " + messages + " messages")
+      coordRef ! MessageCount(messages)
       self.stop()
   }
 
@@ -69,6 +78,8 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
   var end: Long = 0
   var receivedEnds: Int = 0
   var reps: Int = 1
+
+  var totalMessages = 0L
 
   def receive = {
 
@@ -104,11 +115,16 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
           self ! Start
         } else {
           println("Repetitions reached. Broadcasting shutdown...")
-          workers.foreach { x => x ! PoisonPill }
+          workers.foreach {
+            x => x ! End
+          }
           self.stop()
         }
       }
 
+    case MessageCount(messages) =>
+      totalMessages += messages
+      println(totalMessages + "total messages handled")
   }
 
   override def preStart {

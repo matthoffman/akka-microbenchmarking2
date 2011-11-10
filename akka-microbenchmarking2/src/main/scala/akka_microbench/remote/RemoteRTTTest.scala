@@ -16,16 +16,8 @@ package akka_microbench.remote
 
 import akka.actor.Actor
 import Actor._
-import akka.actor.ActorRef
-import akka.actor.PoisonPill
-import akka.actor.ReceiveTimeout
 import akka.dispatch._
-import akka.dispatch.MailboxType
 
-import java.util.Date
-import java.net.InetAddress
-
-import scala.util.Random
 
 /**
  * Receives ping messages and sends out another ping, decreasing the hop counter at receive.
@@ -59,17 +51,17 @@ object RemoteRTTTest extends IpDefinition {
 
   def main(args: Array[String]): Unit = {
 
-    /** MACHINE 0 */
+    /**MACHINE 0 */
     if (args(0) equals "0") {
 
-      remote.start(InetAddress.getLocalHost.getHostAddress, 2552)
+      remote.start("127.0.0.1", 2552)
 
-      remote.register("worker-service0", actorOf(new ReplyWorker(0 /*, coord, numWorkersTotal, sharedDispatcher )*/ )))
+      remote.register("worker-service0", actorOf(new ReplyWorker(0 /*, coord, numWorkersTotal, sharedDispatcher )*/)))
 
 
     } else {
 
-      /** MACHINE 1 */
+      /**MACHINE 1 */
 
       val remoteActor = remote.actorFor("worker-service0", machine0, 2552)
 
@@ -80,7 +72,7 @@ object RemoteRTTTest extends IpDefinition {
           case Some(reply) =>
             val responseTime = System.nanoTime
             val rtt = (responseTime - sendTime) / 1000000.0
-            println("RTT = " + rtt  + " ms")
+            println("RTT = " + rtt + " ms")
 
           case None => sys.error("timeout waiting for reply")
         }
