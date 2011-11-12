@@ -142,7 +142,7 @@ class Master(numWorkers: Int, numMessages: Int, numHops: Int, repetitions: Int) 
 
 object LocalRandomPing extends App {
 
-  startPinging(workers = 8, messages = 10000, hops = 100, repetitions = 5)
+  startPinging(workers = 8, messages = 1000, hops = 100, repetitions = 5)
 
   def startPinging(workers: Int, messages: Int, hops: Int, repetitions: Int) {
 

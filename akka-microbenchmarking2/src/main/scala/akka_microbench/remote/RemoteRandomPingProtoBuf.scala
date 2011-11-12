@@ -32,6 +32,7 @@ import akka.actor._
 import collection.mutable.{ListBuffer, Buffer}
 import scalala.library.Plotting._
 import java.io.{FileWriter, File}
+import akka_microbench.local.Ping._
 
 ;
 
@@ -40,7 +41,8 @@ import java.io.{FileWriter, File}
  */
 class WorkerProtoBuf(coordRef: ActorRef) extends Actor with IpDefinition {
 
-  self.dispatcher = Dispatchers.newThreadBasedDispatcher(self)
+//  self.dispatcher = Dispatchers.newThreadBasedDispatcher(self)
+  self.dispatcher = Dispatcher.dispatcher
 
   var workers: Array[ActorRef] = Array()
 
@@ -88,147 +90,12 @@ class WorkerProtoBuf(coordRef: ActorRef) extends Actor with IpDefinition {
 
 }
 
-/**
- * Coordinates initial ping messages and receive messages from workers when they are finished for time calculation
- */
-class MasterProtoBuf(title: String, numMessages: Int, numHops: Int, repetitions: Int) extends Actor with IpDefinition {
+class MasterProtobuf(title: String, numMessages: Int, numHops: Int, repetitions: Int)
+        extends Master(title, numMessages, numHops, repetitions)  {
 
-  self.dispatcher = Dispatchers.newThreadBasedDispatcher(self)
-
-  var start: Long = 0
-  var end: Long = 0
-  var receivedEnds: Int = 0
-  var reps: Int = 1
-  var totalMessages = 0L
-  var runs: List[Long] = List()
-  var workers: Array[ActorRef] = Array[ActorRef]()
-  var numClients = 0
-  var receivedConcludingResults = 0
-
-  def receive = {
-
-    case Workers(w) =>
-      workers ++= w.map(bytes => RemoteActorSerialization.fromBinaryToRemoteActorRef(bytes))
-      numClients += 1 // we're assuming that we'll get a list of workers once per connected client
-
-    case Start =>
-
-      receivedEnds = 0
-
-      //      // create the workers
-      //      for (i <- 0 until 4)
-      //        workers(i) = remote.actorFor("worker-service" + i, machine0, 2552)
-      //
-      //      for (i <- 4 until 8)
-      //        workers(i) = remote.actorFor("worker-service" + i, machine1, 2552)
-
-      println("Master start run #" + reps)
-
-      start = System.nanoTime
-
-      // let each worker know about all the other workers.
-      println("Known workers: " + workers.map(w => w.toString()).reduceLeft((acc, n) => acc + ", " + n))
-
-      for (i <- 0 until workers.size)
-        workers(i) ! Workers(workers.map(w => RemoteActorSerialization.toRemoteActorRefProtocol(w).toByteArray))
-
-      // send to all of the workers 'numMessages' messages
-      for (i <- 0 until workers.size)
-        for (j <- 0 until numMessages)
-          workers(i) ! Ping.newBuilder.setHop(numHops).build /*Ping(numHops)*/
-
-    case End =>
-      receivedEnds += 1
-
-      // all messages have reached 0 hops
-      if (receivedEnds == workers.size * numMessages) {
-        end = System.nanoTime
-
-        println("Run #" + reps + " ended! Time = " + ((end - start) / 1000000.0) + "ms")
-
-        runs = (end - start) :: runs
-
-        if (reps != repetitions) {
-          reps += 1
-          self ! Start
-        } else {
-          println("Repetitions reached. Broadcasting shutdown...")
-          workers.foreach {
-            x => x ! End
-          }
-          // we don't want to stop ourselves; workers are going to send us summaries
-          //          self.stop()
-        }
-      }
-
-    case MessageCount(count) =>
-      totalMessages += count
-      println("total messages: " + totalMessages)
-
-    case MailboxSizes(senderId, sizes) =>
-      plot(sizes.indices.toArray, sizes.toArray)
-      plot.hold
-      xlabel("time")
-      ylabel("mailbox size")
-      saveas("mailbox_size_" + senderId + "_" + System.currentTimeMillis() + ".png")
-      receivedConcludingResults += 1
-      if (receivedConcludingResults >= workers.size) {
-        // we've gotten an update from everyone we expect
-        self.stop()
-      }
+  override def sendMessageToWorker(worker: ActorRef) {
+    worker ! Ping.newBuilder().setHop(numHops).build()
   }
-
-  override def preStart {
-    println("Start pinging around @ " + new Date(System.currentTimeMillis))
-  }
-
-  /**
-   * Write out a header for our csv file of results
-   */
-  def writeHeader(file: File) {
-    val writer = new FileWriter(file, true)
-    try {
-      writer.write("title,startTime,numMessages,numHops,repetitions,clients,totalWorkers,avgTime,minTime,maxTime,medianTime,msgPerSecond\n")
-    } finally {
-      writer.close()
-    }
-  }
-
-  /**
-   * Write out a CSV file with our results, so we can chart results over time
-   */
-  def writeResultFile(avg: Long, msgPerSecond: Double) {
-    println("writing results to results.csv")
-    val outFile = new File("results.csv")
-    if (!outFile.exists()) writeHeader(outFile)
-
-    val writer = new FileWriter(outFile, true)
-    try {
-      //startTime,numMessages,numHops,repetitions,clients,totalWorkers,avgTime,minTime,maxTime,medianTime
-      writer.write(title + "," + start + "," + numMessages + "," + numHops + "," + repetitions + "," + numClients + "," + workers.size + "," + avg + "," + runs.min + "," + runs.max + "," + median(runs) + "," + msgPerSecond + "\n")
-    } finally {
-      writer.close()
-    }
-  }
-
-  override def postStop {
-    println("End: " + new Date(System.currentTimeMillis))
-    val avg = runs.foldLeft(0L)(_ + _) / runs.size
-    println("Average execution time = " + avg / 1000000.0 + " ms")
-    val msgPerSecond = totalMessages.doubleValue() / (runs.foldLeft(0L)(_ + _) / 1000 / 1000)
-    println("Total messages per second = " + msgPerSecond)
-
-    writeResultFile(avg, msgPerSecond)
-
-    System.exit(0)
-  }
-
-  def median(s: Seq[Long]) = {
-    val (lower, upper) = s.sortWith(_ < _).splitAt(s.size / 2)
-    if (s.size % 2 == 0) (lower.last + upper.head) / 2 else upper.head
-  }
-
-
 }
 
 /**
@@ -270,7 +137,7 @@ object RemoteRandomPingProtoBufMaster {
 
     remote.start("localhost", port)
     // create the master
-    val coordService = actorOf(new MasterProtoBuf(title, messages, hops, repetitions))
+    val coordService = actorOf(new MasterProtobuf(title, messages, hops, repetitions) )
     remote.register("coord-service", coordService)
 
     println("Actors currently registered: " + registry.actors.map(_.toString()).reduceLeft((a, b) => a + ", " + b))
@@ -279,15 +146,20 @@ object RemoteRandomPingProtoBufMaster {
   }
 }
 
+object Dispatcher {
+  val dispatcher = Dispatchers.newExecutorBasedEventDrivenDispatcher("dispatcher")
+          .withNewThreadPoolWithLinkedBlockingQueueWithUnboundedCapacity
+          .build
+}
+
 object OneVMTest {
 
   def main(args: Array[String]): Unit = {
-    val workers = 8
+    val workers = 64
     val messages = 1000
     val hops = 100
     val repetitions = 3
-
-    val coordRef = RemoteRandomPingProtoBufMaster.createCoordinator(2551, messages, hops, repetitions, "akka 1.3-SNAPSHOT")
+    val coordRef = RemoteRandomPingProtoBufMaster.createCoordinator(2551, messages, hops, repetitions, "akka 1.3-SNAPSHOT eventy1")
 
     RemoteRandomPingProtoBufWorkerManager.start(coordRef, port = 2551, numWorkers = workers / 2)
     RemoteRandomPingProtoBufWorkerManager.start(coordRef, port = 2551, numWorkers = workers / 2)
